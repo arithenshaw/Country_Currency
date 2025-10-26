@@ -156,6 +156,10 @@ def generate_summary_image(countries_data):
 
 # ==================== API ENDPOINTS ====================
 
+@app.route('/')
+def home():
+    return "Welcome to my Country currency API"
+
 @app.route('/countries/refresh', methods=['POST'])
 def refresh_countries():
     """
