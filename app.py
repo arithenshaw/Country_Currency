@@ -4,35 +4,47 @@ from datetime import datetime
 import requests
 import random
 import os
+from urllib.parse import quote_plus 
 from PIL import Image, ImageDraw, ImageFont
 
 # Initialize Flask app
 app = Flask(__name__)
 
-if os.getenv('DATABASE_URL'):
-    DATABASE_URL = os.getenv('DATABASE_URL')
-elif os.getenv('MYSQL_URL'):
-    DATABASE_URL = os.getenv('MYSQL_URL')
-elif os.getenv('MYSQLURL'):
-    DATABASE_URL = os.getenv('MYSQLURL')
-else:
-    # Local development
-    DATABASE_URL = f"mysql+mysqlconnector://root:root@localhost:3306/country_api"
-    print("✅ Using local database")
+# ---- Build DB URL from Railway envs (preferred), or DATABASE_URL, else SQLite fallback ----
+MYSQL_HOST = os.getenv('MYSQLHOST')
+MYSQL_PORT = os.getenv('MYSQLPORT', '3306')
+MYSQL_USER = os.getenv('MYSQLUSER', 'root')
+MYSQL_PASSWORD = os.getenv('MYSQLPASSWORD')
+MYSQL_DATABASE = os.getenv('MYSQLDATABASE', 'railway')
 
-# Fix URL format
-if DATABASE_URL and DATABASE_URL.startswith('mysql://'):
-    DATABASE_URL = DATABASE_URL.replace('mysql://', 'mysql+mysqlconnector://', 1)
+DATABASE_URL = None
 
-if 'localhost' not in DATABASE_URL:
-    print("✅ Using deployment database")
+if MYSQL_HOST and MYSQL_PASSWORD and MYSQL_DATABASE:
+    encoded_password = quote_plus(MYSQL_PASSWORD)
+    # Use PyMySQL driver on Railway (pure Python; no system deps)
+    DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{encoded_password}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+    print("✅ Using deployment database (Railway parts)")
 else:
-    print("✅ Using local database")
+    raw = os.getenv('DATABASE_URL') or os.getenv('DB_URL') or os.getenv('MYSQL_URL') or os.getenv('MYSQLURL')
+    if raw:
+        # Normalize to PyMySQL if it's a MySQL URL
+        if raw.startswith('mysql://'):
+            raw = raw.replace('mysql://', 'mysql+pymysql://', 1)
+        if raw.startswith('mysql+mysqlconnector://'):
+            raw = raw.replace('mysql+mysqlconnector://', 'mysql+pymysql://', 1)
+        DATABASE_URL = raw
+        print("✅ Using deployment database (full URL)")
+    else:
+        # Local dev fallback (no MySQL required)
+        DATABASE_URL = "sqlite:///country_api.db"
+        print("⚠️ Using local SQLite database (no Railway DB vars found)")
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Keep connections healthy on Railway
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True, "pool_recycle": 280}
 
-# API URLs
+# External APIs
 COUNTRIES_API = "https://restcountries.com/v2/all?fields=name,capital,region,population,flag,currencies"
 EXCHANGE_RATE_API = "https://open.er-api.com/v6/latest/USD"
 
@@ -43,11 +55,10 @@ CACHE_DIR = "cache"
 API_TIMEOUT = 10
 
 # Flask secret key (for sessions)
-app.config['SECRET_KEY'] = 'your-secret-key-change-this-in-production'
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-this-in-production')
 
 # Initialize database
-db = SQLAlchemy(app)
-
+db = SQLAlchemy(app)  # <-- fixed )
 
 # ==================== DATABASE MODELS ====================
 
@@ -59,7 +70,7 @@ class Country(db.Model):
     name = db.Column(db.String(100), nullable=False, unique=True)
     capital = db.Column(db.String(100), nullable=True)
     region = db.Column(db.String(50), nullable=True)
-    population = db.Column(db.BigInteger, nullable=False)
+    population = db.Column(db.BigInteger, nullable=False, default=0)
     currency_code = db.Column(db.String(10), nullable=True)
     exchange_rate = db.Column(db.Float, nullable=True)
     estimated_gdp = db.Column(db.Float, nullable=True)
@@ -99,12 +110,13 @@ class RefreshMetadata(db.Model):
             'last_refreshed_at': self.last_refreshed_at.isoformat() + 'Z' if self.last_refreshed_at else None
         }
 
-
 # Create tables and cache directory
 with app.app_context():
-    db.create_all()
     os.makedirs(CACHE_DIR, exist_ok=True)
-
+    try:
+        db.create_all()
+    except Exception as e:
+        app.logger.error(f"DB init failed: {e}")
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -115,7 +127,6 @@ def calculate_gdp(population, exchange_rate):
     multiplier = random.uniform(1000, 2000)
     return (population * multiplier) / exchange_rate
 
-
 def generate_summary_image(countries_data):
     """Generate a summary image with country statistics"""
     img = Image.new('RGB', (800, 600), color='white')
@@ -125,12 +136,12 @@ def generate_summary_image(countries_data):
     try:
         title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
         text_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-    except:
+    except Exception:
         try:
             # Windows font path
             title_font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 32)
             text_font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 20)
-        except:
+        except Exception:
             title_font = ImageFont.load_default()
             text_font = ImageFont.load_default()
     
@@ -166,7 +177,6 @@ def generate_summary_image(countries_data):
     img.save(image_path)
     return image_path
 
-
 # ==================== API ENDPOINTS ====================
 
 @app.route('/')
@@ -175,34 +185,23 @@ def home():
 
 @app.route('/countries/refresh', methods=['POST'])
 def refresh_countries():
-    """
-    Fetch data from external APIs and update database
-    POST /countries/refresh
-    """
+    """Fetch data from external APIs and update database"""
     try:
-        # Fetch country data
         countries_response = requests.get(COUNTRIES_API, timeout=API_TIMEOUT)
         countries_response.raise_for_status()
         countries_data = countries_response.json()
-        
     except requests.RequestException as e:
-        return jsonify({
-            "error": "External data source unavailable",
-            "details": f"Could not fetch data from countries API: {str(e)}"
-        }), 503
+        return jsonify({"error": "External data source unavailable",
+                        "details": f"Could not fetch data from countries API: {str(e)}"}), 503
     
     try:
-        # Fetch exchange rates
         exchange_response = requests.get(EXCHANGE_RATE_API, timeout=API_TIMEOUT)
         exchange_response.raise_for_status()
         exchange_data = exchange_response.json()
         exchange_rates = exchange_data.get('rates', {})
-        
     except requests.RequestException as e:
-        return jsonify({
-            "error": "External data source unavailable",
-            "details": f"Could not fetch data from exchange rate API: {str(e)}"
-        }), 503
+        return jsonify({"error": "External data source unavailable",
+                        "details": f"Could not fetch data from exchange rate API: {str(e)}"}), 503
     
     # Process each country
     for country_data in countries_data:
@@ -211,10 +210,10 @@ def refresh_countries():
             continue
         
         # Extract currency code (first one if multiple exist)
-        currencies = country_data.get('currencies', [])
+        currencies = country_data.get('currencies') or []
         currency_code = None
-        if currencies and len(currencies) > 0:
-            currency_code = currencies[0].get('code')
+        if currencies:
+            currency_code = (currencies[0] or {}).get('code')
         
         # Get exchange rate only if currency exists
         exchange_rate = None
@@ -222,8 +221,6 @@ def refresh_countries():
         
         if currency_code:
             exchange_rate = exchange_rates.get(currency_code)
-            
-            # Calculate GDP only if we have all required data
             population = country_data.get('population')
             if population and exchange_rate:
                 estimated_gdp = calculate_gdp(population, exchange_rate)
@@ -237,7 +234,7 @@ def refresh_countries():
             # Update existing record
             existing_country.capital = country_data.get('capital')
             existing_country.region = country_data.get('region')
-            existing_country.population = country_data.get('population', 0)
+            existing_country.population = country_data.get('population') or 0
             existing_country.currency_code = currency_code
             existing_country.exchange_rate = exchange_rate
             existing_country.estimated_gdp = estimated_gdp
@@ -249,7 +246,7 @@ def refresh_countries():
                 name=name,
                 capital=country_data.get('capital'),
                 region=country_data.get('region'),
-                population=country_data.get('population', 0),
+                population=country_data.get('population') or 0,
                 currency_code=currency_code,
                 exchange_rate=exchange_rate,
                 estimated_gdp=estimated_gdp,
@@ -277,31 +274,23 @@ def refresh_countries():
             total_countries=total_countries
         )
         db.session.add(metadata)
-    
-    db.session.commit()
+        db.session.commit()
     
     # Generate summary image
     try:
         all_countries = Country.query.all()
         generate_summary_image(all_countries)
     except Exception as e:
-        print(f"Warning: Could not generate summary image: {e}")
+        app.logger.warning(f"Warning: Could not generate summary image: {e}")
     
     return jsonify({
         "message": "Countries refreshed successfully",
         "total_countries": total_countries
     }), 200
 
-
 @app.route('/countries', methods=['GET'])
 def get_countries():
-    """
-    Get all countries with optional filtering and sorting
-    GET /countries
-    GET /countries?region=Africa
-    GET /countries?currency=NGN
-    GET /countries?sort=gdp_desc
-    """
+    """Get all countries with optional filtering and sorting"""
     query = Country.query
     
     # Apply filters
@@ -313,95 +302,63 @@ def get_countries():
     if currency:
         query = query.filter(db.func.lower(Country.currency_code) == currency.lower())
     
-    # Apply sorting
+    # Apply sorting (MySQL-safe)
     sort = request.args.get('sort')
     if sort == 'gdp_desc':
-        query = query.order_by(Country.estimated_gdp.desc().nullslast())
+        query = query.order_by(db.desc(Country.estimated_gdp))
     elif sort == 'gdp_asc':
-        query = query.order_by(Country.estimated_gdp.asc().nullsfirst())
+        query = query.order_by(db.asc(Country.estimated_gdp))
     elif sort == 'name':
-        query = query.order_by(Country.name)
+        query = query.order_by(Country.name.asc())
     
-    # Execute query
     countries = query.all()
     return jsonify([country.to_dict() for country in countries]), 200
 
-
 @app.route('/countries/<string:name>', methods=['GET'])
 def get_country(name):
-    """
-    Get a single country by name
-    GET /countries/Nigeria
-    """
+    """Get a single country by name"""
     country = Country.query.filter(
         db.func.lower(Country.name) == name.lower()
     ).first()
-    
     if not country:
         return jsonify({"error": "Country not found"}), 404
-    
     return jsonify(country.to_dict()), 200
-
 
 @app.route('/countries/<string:name>', methods=['DELETE'])
 def delete_country(name):
-    """
-    Delete a country by name
-    DELETE /countries/Nigeria
-    """
+    """Delete a country by name"""
     country = Country.query.filter(
         db.func.lower(Country.name) == name.lower()
     ).first()
-    
     if not country:
         return jsonify({"error": "Country not found"}), 404
-    
     try:
         db.session.delete(country)
         db.session.commit()
-        
-        # Update total count in metadata
         metadata = RefreshMetadata.query.first()
         if metadata:
             metadata.total_countries = Country.query.count()
             db.session.commit()
-        
         return jsonify({"message": f"Country '{name}' deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Database error", "details": str(e)}), 500
 
-
 @app.route('/status', methods=['GET'])
 def get_status():
-    """
-    Get total countries and last refresh timestamp
-    GET /status
-    """
+    """Get total countries and last refresh timestamp"""
     metadata = RefreshMetadata.query.first()
-    
     if not metadata:
-        return jsonify({
-            "total_countries": 0,
-            "last_refreshed_at": None
-        }), 200
-    
+        return jsonify({"total_countries": 0, "last_refreshed_at": None}), 200
     return jsonify(metadata.to_dict()), 200
-
 
 @app.route('/countries/image', methods=['GET'])
 def get_summary_image():
-    """
-    Serve the generated summary image
-    GET /countries/image
-    """
+    """Serve the generated summary image"""
     image_path = os.path.join(CACHE_DIR, 'summary.png')
-    
     if not os.path.exists(image_path):
         return jsonify({"error": "Summary image not found"}), 404
-    
     return send_file(image_path, mimetype='image/png')
-
 
 # ==================== ERROR HANDLERS ====================
 
@@ -409,19 +366,17 @@ def get_summary_image():
 def bad_request(e):
     return jsonify({"error": "Validation failed"}), 400
 
-
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({"error": "Resource not found"}), 404
-
 
 @app.errorhandler(500)
 def internal_error(e):
     return jsonify({"error": "Internal server error"}), 500
 
-
 # ==================== RUN APPLICATION ====================
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(debug=debug, host='0.0.0.0', port=port)
