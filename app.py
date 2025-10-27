@@ -17,16 +17,26 @@ MYSQL_USER = os.getenv('MYSQLUSER', 'root')
 MYSQL_PASSWORD = os.getenv('MYSQLPASSWORD')
 MYSQL_DATABASE = os.getenv('MYSQLDATABASE', 'railway')
 
+
+def _clean(v):
+    return v.strip().strip('"').strip("'") if v else v
+
+def _looks_like_sqlalchemy_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.lower().strip()
+    return u.startswith("mysql://") or u.startswith("mysql+pymysql://") or u.startswith("mysql+mysqlconnector://") or u.startswith("sqlite:///")
+
+
 DATABASE_URL = None
 
 if MYSQL_HOST and MYSQL_PASSWORD and MYSQL_DATABASE:
     encoded_password = quote_plus(MYSQL_PASSWORD)
-    # Use PyMySQL driver on Railway (pure Python; no system deps)
-    DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{encoded_password}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+    DATABASE_URL = f"mysql+pymysql://{_clean(MYSQL_USER)}:{encoded_password}@{_clean(MYSQL_HOST)}:{_clean(MYSQL_PORT)}/{_clean(MYSQL_DATABASE)}"
     print("✅ Using deployment database (Railway parts)")
 else:
-    raw = os.getenv('DATABASE_URL') or os.getenv('DB_URL') or os.getenv('MYSQL_URL') or os.getenv('MYSQLURL')
-    if raw:
+    raw = _clean(os.getenv('DATABASE_URL') or os.getenv('DB_URL') or os.getenv('MYSQL_URL') or os.getenv('MYSQLURL'))
+    if raw and _looks_like_sqlalchemy_url(raw):
         # Normalize to PyMySQL if it's a MySQL URL
         if raw.startswith('mysql://'):
             raw = raw.replace('mysql://', 'mysql+pymysql://', 1)
@@ -38,6 +48,8 @@ else:
         # Local dev fallback (no MySQL required)
         DATABASE_URL = "sqlite:///country_api.db"
         print("⚠️ Using local SQLite database (no Railway DB vars found)")
+
+print("DB URI (sanitized):", (DATABASE_URL.split('@')[0] + "@***") if "@" in DATABASE_URL else DATABASE_URL)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
