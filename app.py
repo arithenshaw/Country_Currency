@@ -10,26 +10,26 @@ from PIL import Image, ImageDraw, ImageFont
 app = Flask(__name__)
 
 if os.getenv('DATABASE_URL'):
-    # Production: Use environment variable from Railway/Heroku
     DATABASE_URL = os.getenv('DATABASE_URL')
-    
-    # Fix MySQL URL format if needed
-    if DATABASE_URL.startswith('mysql://'):
-        DATABASE_URL = DATABASE_URL.replace('mysql://', 'mysql+mysqlconnector://', 1)
-    
-    app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
-    print("✅ Using deployment database")
+elif os.getenv('MYSQL_URL'):
+    DATABASE_URL = os.getenv('MYSQL_URL')
+elif os.getenv('MYSQLURL'):
+    DATABASE_URL = os.getenv('MYSQLURL')
 else:
-    # Local development: Use hardcoded values
-    DB_USERNAME = "root"
-    DB_PASSWORD = "root"  # Your local MySQL password
-    DB_HOST = "localhost"
-    DB_PORT = "3306"
-    DB_NAME = "country_api"
-    
-    app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql+mysqlconnector://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # Local development
+    DATABASE_URL = f"mysql+mysqlconnector://root:root@localhost:3306/country_api"
     print("✅ Using local database")
 
+# Fix URL format
+if DATABASE_URL and DATABASE_URL.startswith('mysql://'):
+    DATABASE_URL = DATABASE_URL.replace('mysql://', 'mysql+mysqlconnector://', 1)
+
+if 'localhost' not in DATABASE_URL:
+    print("✅ Using deployment database")
+else:
+    print("✅ Using local database")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # API URLs
