@@ -9,14 +9,27 @@ from PIL import Image, ImageDraw, ImageFont
 # Initialize Flask app
 app = Flask(__name__)
 
-DB_USERNAME = "root"
-DB_PASSWORD = "root" 
-DB_HOST = "localhost"
-DB_PORT = "3306"
-DB_NAME = "country_api"
+if os.getenv('DATABASE_URL'):
+    # Production: Use environment variable from Railway/Heroku
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    
+    # Fix MySQL URL format if needed
+    if DATABASE_URL.startswith('mysql://'):
+        DATABASE_URL = DATABASE_URL.replace('mysql://', 'mysql+mysqlconnector://', 1)
+    
+    app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+    print("✅ Using deployment database")
+else:
+    # Local development: Use hardcoded values
+    DB_USERNAME = "root"
+    DB_PASSWORD = "root"  # Your local MySQL password
+    DB_HOST = "localhost"
+    DB_PORT = "3306"
+    DB_NAME = "country_api"
+    
+    app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql+mysqlconnector://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    print("✅ Using local database")
 
-# Build database URI
-app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql+mysqlconnector://root:root@localhost:3306/country_api"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # API URLs
